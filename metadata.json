@@ -1,0 +1,5 @@
+{
+  "name": "Snap2Serve",
+  "description": "AI-powered recipe recommendations based on ingredient photos and cooking time constraints.",
+  "requestFramePermissions": ["camera"]
+}
