@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+hu<<<<<<< HEAD
 <div align="center">
 <img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
 </div>
@@ -63,6 +63,15 @@ Recipes are displayed to the user for selection and sharing.<br>
 -Reduces food wastage<br>
 -Personalized recommendations<br>
 -Easy and user-friendly interface
+
+
+# Stakeholders
+- End Users: Use the app to find and cook recipes  
+- AI System: Detects ingredients and generates recipes  
+- Developers: Build and maintain the application  
+- System Administrator: Ensures smooth operation  
+- Database: Stores user data and recipes  
+- Cloud Provider: Hosts the application  
 
 
 
