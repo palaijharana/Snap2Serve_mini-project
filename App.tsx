@@ -64,6 +64,18 @@ function pcmToWav(pcmBase64: string, sampleRate: number = 24000): string {
   const blob = new Blob([wavHeader, pcmData], { type: 'audio/wav' });
   return URL.createObjectURL(blob);
 }
+const getPasswordStrength = (password: string) => {
+  let score = 0;
+
+  if (password.length >= 8) score++;
+  if (/[A-Z]/.test(password)) score++;
+  if (/[0-9]/.test(password)) score++;
+  if (/[^A-Za-z0-9]/.test(password)) score++;
+
+  if (score <= 1) return { label: "Weak", color: "text-red-500" };
+  if (score <= 3) return { label: "Medium", color: "text-yellow-500" };
+  return { label: "Strong", color: "text-green-500" };
+};
 
 export default function App() {
   const [step, setStep] = useState<'home' | 'detecting' | 'ingredients' | 'recipes' | 'detail' | 'history' | 'cooking' | 'favorites' | 'explore'>('home');
@@ -78,6 +90,7 @@ export default function App() {
   const [authLoading, setAuthLoading] = useState(false);
   const [user, setUser] = useState<{ username: string; email: string } | null>(null);
   const [loginForm, setLoginForm] = useState({ username: '', email: '', password: '' });
+  const passwordStrength = getPasswordStrength(loginForm.password);
   const [showRating, setShowRating] = useState(false);
   const [rating, setRating] = useState(0);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
@@ -964,6 +977,16 @@ const [preferences, setPreferences] = useState<UserPreferences>({
                   />
                 </div>
               </div>
+              {loginForm.password && (
+  <div className="mt-2 ml-2">
+    <p className={`text-sm font-bold ${passwordStrength.color}`}>
+      Strength: {passwordStrength.label}
+    </p>
+    <p className="text-xs text-gray-500">
+      Must contain 8+ characters, uppercase, number & special symbol
+    </p>
+  </div>
+)}
 
               <button 
                 onClick={async () => {
@@ -1435,4 +1458,5 @@ const [preferences, setPreferences] = useState<UserPreferences>({
     </div>
   );
 }
+
 
