@@ -83,6 +83,7 @@ export default function App() {
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
   const [newIngredient, setNewIngredient] = useState('');
   const [showAddInput, setShowAddInput] = useState(false);
+  const [visitorCount, setVisitorCount] = useState(0);
 
   const loadingMessages = [
     "Our AI is finding all the hidden treasures!",
@@ -93,21 +94,24 @@ export default function App() {
     "Polishing the cooking instructions..."
   ];
 
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (step === 'detecting' || (step === 'ingredients' && loading)) {
-      interval = setInterval(() => {
-        setLoadingMessageIndex((prev) => (prev + 1) % loadingMessages.length);
-      }, 3000);
-    }
-    return () => clearInterval(interval);
-  }, [step, loading]);
+useEffect(() => {
+  let interval: NodeJS.Timeout;
+  if (step === 'detecting' || (step === 'ingredients' && loading)) {
+    interval = setInterval(() => {
+      setLoadingMessageIndex((prev) => (prev + 1) % loadingMessages.length);
+    }, 3000);
+  }
+  return () => clearInterval(interval);
+}, [step, loading]);
 
-  const [preferences, setPreferences] = useState<UserPreferences>({
-    dietaryRestrictions: [],
-    allergies: [],
-    maxTime: 45,
-  });
+useEffect(() => {
+  fetch("http://localhost:5000/api/visit")
+    .then(res => res.json())
+    .then(data => setVisitorCount(data.count))
+    .catch(err => console.error("Visitor count error:", err));
+}, []);
+
+const [preferences, setPreferences] = useState<UserPreferences>({
   const [favorites, setFavorites] = useState<Recipe[]>([]);
   const [history, setHistory] = useState<Recipe[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -284,6 +288,9 @@ export default function App() {
         <ChefHat className="w-24 h-24 text-cute-pink relative z-10" />
       </div>
       <h1 className="text-6xl md:text-8xl font-display mb-6 tracking-tight text-cute-pink">Snap2Serve</h1>
+      <p className="text-lg font-semibold text-gray-600 mt-2">
+  👀 Visitors: {visitorCount}
+</p>
       <p className="text-xl md:text-2xl text-brand-600 max-w-2xl mb-12 font-display italic">
         Turn your ingredients into yummy masterpieces with AI! Just snap a photo and start cooking.
       </p>
@@ -1428,3 +1435,4 @@ export default function App() {
     </div>
   );
 }
+
