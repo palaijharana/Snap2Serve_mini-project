@@ -26,15 +26,16 @@ const PORT = 3000;
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
-// AI Proxy routes removed - now handled on frontend
-
 // MongoDB Connection
 const MONGODB_URI = process.env.MONGODB_URI || "mongodb://localhost:27017/snap2serve";
 mongoose.connect(MONGODB_URI)
   .then(() => console.log("Connected to MongoDB"))
   .catch((err) => console.error("MongoDB connection error:", err));
 
-// Schemas
+/* =========================
+   SCHEMAS
+========================= */
+
 const RecipeSchema = new mongoose.Schema({
   id: String,
   title: String,
@@ -60,60 +61,57 @@ const UserSchema = new mongoose.Schema({
 
 const User = mongoose.model("User", UserSchema);
 
-// API Routes
- //🔐 Authentication Routes
+const VisitorSchema = new mongoose.Schema({
+  count: { type: Number, default: 0 }
+});
+
+const Visitor = mongoose.model("Visitor", VisitorSchema);
+
+
 // Login
 app.post("/api/auth/login", async (req, res) => {
   const { username, password } = req.body;
-  console.log("Login attempt for:", username);
   try {
-    // Allow login by username or email
     const user = await User.findOne({
       $or: [{ username: username }, { email: username }]
     });
-    
+
     if (!user) {
-      console.log("User not found:", username);
       return res.status(401).json({ error: "User not found" });
     }
-    
+
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      console.log("Invalid password for:", username);
       return res.status(401).json({ error: "Invalid password" });
     }
-    
-    console.log("Login successful for:", username);
+
     res.json({ username: user.username, email: user.email });
   } catch (error) {
-    console.error("Login error:", error);
     res.status(500).json({ error: "Login failed" });
   }
 });
 
+// Signup
 app.post("/api/auth/signup", async (req, res) => {
   const { username, email, password } = req.body;
-  console.log("Signup attempt for:", username, email);
 
   try {
     const strongRegex = /^(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
 
-    // ✅ FIX: properly closed block
     if (!strongRegex.test(password)) {
       return res.status(400).json({
-        error: "Password must be at least 8 characters, include 1 uppercase, 1 number, and 1 special character"
+        error: "Password must be strong"
       });
     }
 
     const existingUser = await User.findOne({ 
       $or: [{ username }, { email }] 
     });
-    
+
     if (existingUser) {
-      const field = existingUser.username === username ? "Username" : "Email";
-      return res.status(400).json({ error: `${field} already exists` });
+      return res.status(400).json({ error: "User already exists" });
     }
-    
+
     const hashedPassword = await bcrypt.hash(password, 10);
 
     const user = new User({ 
@@ -123,73 +121,120 @@ app.post("/api/auth/signup", async (req, res) => {
       favorites: [], 
       history: [] 
     });
-    
-    await user.save();
 
-    console.log("Signup successful for:", username);
+    await user.save();
     res.json({ username: user.username, email: user.email });
 
   } catch (error) {
-    console.error("Signup error:", error);
     res.status(500).json({ error: "Signup failed" });
   }
 });
-// Get User Data (Favorites & History)
+
+/* =========================
+   USER ROUTES
+========================= */
+
+// Get User Data
 app.get("/api/user/data", async (req, res) => {
   const { username } = req.query;
   try {
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: "User not found" });
+
     res.json({ favorites: user.favorites, history: user.history });
-  } catch (error) {
+  } catch {
     res.status(500).json({ error: "Failed to fetch data" });
   }
 });
 
-// Toggle Favorite
+// Favorites
 app.post("/api/user/favorites", async (req, res) => {
   const { username, recipe } = req.body;
+
   try {
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: "User not found" });
 
     const index = user.favorites.findIndex((f: any) => f.id === recipe.id);
+
     if (index > -1) {
       user.favorites.splice(index, 1);
     } else {
       user.favorites.unshift(recipe);
     }
+
     await user.save();
     res.json({ favorites: user.favorites });
-  } catch (error) {
+
+  } catch {
     res.status(500).json({ error: "Failed to update favorites" });
   }
 });
 
-// Add to History
+// History
 app.post("/api/user/history", async (req, res) => {
   const { username, recipe } = req.body;
+
   try {
     const user = await User.findOne({ username });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // Remove if exists to move to top
     user.history = user.history.filter((h: any) => h.id !== recipe.id) as any;
     user.history.unshift(recipe);
-    
-    // Keep last 10
+
     if (user.history.length > 10) {
       user.history = user.history.slice(0, 10) as any;
     }
-    
+
     await user.save();
     res.json({ history: user.history });
-  } catch (error) {
+
+  } catch {
     res.status(500).json({ error: "Failed to update history" });
   }
 });
 
-// Vite Middleware for Development
+
+
+// Get Visitor Count
+app.get("/api/visitors", async (req, res) => {
+  try {
+    let visitor = await Visitor.findOne();
+
+    if (!visitor) {
+      visitor = new Visitor({ count: 0 });
+      await visitor.save();
+    }
+
+    res.json({ count: visitor.count });
+  } catch {
+    res.status(500).json({ error: "Failed to get visitor count" });
+  }
+});
+
+// Increment Visitor Count
+app.post("/api/visit", async (req, res) => {
+  try {
+    let visitor = await Visitor.findOne();
+
+    if (!visitor) {
+      visitor = new Visitor({ count: 1 });
+    } else {
+      visitor.count += 1;
+    }
+
+    await visitor.save();
+
+    res.json({ count: visitor.count });
+  } catch {
+    res.status(500).json({ error: "Failed to update visitor count" });
+  }
+});
+
+/* =========================
+   VITE SETUP
+========================= */
+
 async function setupVite() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
