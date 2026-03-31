@@ -5,7 +5,7 @@ import {
   Upload, 
   Clock, 
   ChefHat, 
-  Utensils, 
+  Utensils,
   Volume2, 
   ArrowLeft, 
   CheckCircle2, 
@@ -1022,6 +1022,10 @@ const [preferences, setPreferences] = useState<UserPreferences>({
 )}
 
               <button 
+                if (isSignup && loginForm.password !== loginForm.confirmPassword) {
+  alert("Passwords do not match!");
+  return;
+}
                 onClick={async () => {
                   const endpoint = isSignup ? "/api/auth/signup" : "/api/auth/login";
                   setAuthLoading(true);
