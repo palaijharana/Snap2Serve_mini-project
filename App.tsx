@@ -89,7 +89,12 @@ export default function App() {
   const [isSignup, setIsSignup] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [user, setUser] = useState<{ username: string; email: string } | null>(null);
-  const [loginForm, setLoginForm] = useState({ username: '', email: '', password: '' });
+  const [loginForm, setLoginForm] = useState({ 
+  username: '', 
+  email: '', 
+  password: '', 
+  confirmPassword: '' 
+  });
   const passwordStrength = getPasswordStrength(loginForm.password);
   const [showRating, setShowRating] = useState(false);
   const [rating, setRating] = useState(0);
