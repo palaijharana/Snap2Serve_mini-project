@@ -5,7 +5,7 @@ import {
   Upload, 
   Clock, 
   ChefHat, 
-  Utensils,
+  Utensils, 
   Volume2, 
   ArrowLeft, 
   CheckCircle2, 
@@ -23,11 +23,125 @@ import {
   Mail,
   Lock,
   Star,
-  LogOut
+  LogOut,
+  Home,
+  Compass,
+  Eye,
+  EyeOff,
+  Calendar,
+  ShieldCheck,
+  ShieldAlert,
+  Shield,
+  BarChart3,
+  Users,
+  Timer,
+  Carrot,
+  Cherry,
+  Apple,
+  Citrus,
+  Grape,
+  Leaf,
+  Pizza,
+  Egg,
+  Soup,
+  Cookie,
+  Sandwich,
+  Beef,
+  Fish,
+  Drumstick,
+  Ham,
+  Croissant,
+  Donut,
+  Bean,
+  Wheat,
+  CookingPot,
+  Flame,
+  Sparkles,
+  IceCream,
+  Popcorn,
+  Coffee,
+  UtensilsCrossed,
+  Cake
 } from 'lucide-react';
-import { Recipe, Ingredient, UserPreferences } from './types';
+import { Recipe, Ingredient, UserPreferences, Session, AnalyticsData } from './types';
 import { detectIngredients, generateRecipes, generateSpeech } from './services/geminiService';
 import { cn } from './lib/utils';
+import { auth, db } from './firebase';
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  onAuthStateChanged, 
+  signOut,
+  updateProfile
+} from 'firebase/auth';
+import { 
+  collection, 
+  doc, 
+  setDoc, 
+  getDoc, 
+  updateDoc, 
+  arrayUnion, 
+  arrayRemove, 
+  onSnapshot, 
+  query, 
+  orderBy, 
+  limit, 
+  getDocs, 
+  addDoc, 
+  serverTimestamp,
+  getDocFromServer
+} from 'firebase/firestore';
+
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId: string | undefined;
+    email: string | null | undefined;
+    emailVerified: boolean | undefined;
+    isAnonymous: boolean | undefined;
+    tenantId: string | null | undefined;
+    providerInfo: {
+      providerId: string;
+      displayName: string | null;
+      email: string | null;
+      photoUrl: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData.map(provider => ({
+        providerId: provider.providerId,
+        displayName: provider.displayName,
+        email: provider.email,
+        photoUrl: provider.photoURL
+      })) || []
+    },
+    operationType,
+    path
+  }
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 function pcmToWav(pcmBase64: string, sampleRate: number = 24000): string {
   const pcmData = Uint8Array.from(atob(pcmBase64), c => c.charCodeAt(0));
@@ -64,21 +178,9 @@ function pcmToWav(pcmBase64: string, sampleRate: number = 24000): string {
   const blob = new Blob([wavHeader, pcmData], { type: 'audio/wav' });
   return URL.createObjectURL(blob);
 }
-const getPasswordStrength = (password: string) => {
-  let score = 0;
-
-  if (password.length >= 8) score++;
-  if (/[A-Z]/.test(password)) score++;
-  if (/[0-9]/.test(password)) score++;
-  if (/[^A-Za-z0-9]/.test(password)) score++;
-
-  if (score <= 1) return { label: "Weak", color: "text-red-500" };
-  if (score <= 3) return { label: "Medium", color: "text-yellow-500" };
-  return { label: "Strong", color: "text-green-500" };
-};
 
 export default function App() {
-  const [step, setStep] = useState<'home' | 'detecting' | 'ingredients' | 'recipes' | 'detail' | 'history' | 'cooking' | 'favorites' | 'explore'>('home');
+  const [step, setStep] = useState<'home' | 'detecting' | 'ingredients' | 'recipes' | 'detail' | 'history' | 'cooking' | 'favorites' | 'explore' | 'analytics'>('home');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [detectedIngredients, setDetectedIngredients] = useState<Ingredient[]>([]);
   const [recipes, setRecipes] = useState<Recipe[]>([]);
@@ -88,20 +190,49 @@ export default function App() {
   const [isLoginOpen, setIsLoginOpen] = useState(false);
   const [isSignup, setIsSignup] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
-  const [user, setUser] = useState<{ username: string; email: string } | null>(null);
-  const [loginForm, setLoginForm] = useState({ 
-  username: '', 
-  email: '', 
-  password: '', 
-  confirmPassword: '' 
-  });
-  const passwordStrength = getPasswordStrength(loginForm.password);
+  const [user, setUser] = useState<{ username: string; email: string; dob?: string } | null>(null);
+  const [loginForm, setLoginForm] = useState({ username: '', email: '', password: '', confirmPassword: '', dob: '' });
+  const [showPassword, setShowPassword] = useState(false);
   const [showRating, setShowRating] = useState(false);
+  const [analyticsData, setAnalyticsData] = useState<AnalyticsData | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const sessionRef = useRef<string | null>(null);
+
+  const getPasswordStrength = (password: string) => {
+    if (!password) return { label: '', color: '', score: 0 };
+    let score = 0;
+    if (password.length >= 8) score++;
+    if (/[A-Z]/.test(password)) score++;
+    if (/[a-z]/.test(password)) score++;
+    if (/[0-9]/.test(password)) score++;
+    if (/[^A-Za-z0-9]/.test(password)) score++;
+
+    if (score <= 2) return { label: 'Easy', color: 'text-red-500', score };
+    if (score <= 4) return { label: 'Medium', color: 'text-yellow-500', score };
+    return { label: 'Hard', color: 'text-green-500', score };
+  };
+
+  const validatePassword = (password: string) => {
+    const regex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&]).{8,}$/;
+    if (!regex.test(password)) {
+      return "Password must be at least 8 characters and include uppercase, lowercase, number, and special character.";
+    }
+    return null;
+  };
+
+  const getPasswordRequirements = (password: string) => {
+    return [
+      { label: 'At least 8 characters', met: password.length >= 8 },
+      { label: 'Uppercase letter', met: /[A-Z]/.test(password) },
+      { label: 'Lowercase letter', met: /[a-z]/.test(password) },
+      { label: 'A number', met: /[0-9]/.test(password) },
+      { label: 'Special character (@$!%*?&)', met: /[@$!%*?&]/.test(password) },
+    ];
+  };
   const [rating, setRating] = useState(0);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
   const [newIngredient, setNewIngredient] = useState('');
   const [showAddInput, setShowAddInput] = useState(false);
-  const [visitorCount, setVisitorCount] = useState(0);
 
   const loadingMessages = [
     "Our AI is finding all the hidden treasures!",
@@ -112,24 +243,146 @@ export default function App() {
     "Polishing the cooking instructions..."
   ];
 
-useEffect(() => {
-  let interval: NodeJS.Timeout;
-  if (step === 'detecting' || (step === 'ingredients' && loading)) {
-    interval = setInterval(() => {
-      setLoadingMessageIndex((prev) => (prev + 1) % loadingMessages.length);
-    }, 3000);
-  }
-  return () => clearInterval(interval);
-}, [step, loading]);
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (step === 'detecting' || (step === 'ingredients' && loading)) {
+      interval = setInterval(() => {
+        setLoadingMessageIndex((prev) => (prev + 1) % loadingMessages.length);
+      }, 3000);
+    }
+    return () => clearInterval(interval);
+  }, [step, loading]);
 
-useEffect(() => {
-  fetch("http://localhost:5000/api/visit")
-    .then(res => res.json())
-    .then(data => setVisitorCount(data.count))
-    .catch(err => console.error("Visitor count error:", err));
-}, []);
+  // Firebase Auth Listener
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // Fetch additional user data from Firestore if needed
+        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+        if (userDoc.exists()) {
+          const userData = userDoc.data();
+          setUser({
+            username: userData.username || firebaseUser.displayName || 'Chef',
+            email: firebaseUser.email || '',
+            dob: userData.dob
+          });
+        } else {
+          setUser({
+            username: firebaseUser.displayName || 'Chef',
+            email: firebaseUser.email || '',
+          });
+        }
+      } else {
+        setUser(null);
+      }
+      setIsAuthReady(true);
+    });
+    return () => unsubscribe();
+  }, []);
 
-const [preferences, setPreferences] = useState<UserPreferences>({
+  // Visitor Tracking
+  useEffect(() => {
+    let visitorId = localStorage.getItem('snap2serve_visitor_id');
+    if (!visitorId) {
+      visitorId = 'visitor_' + Math.random().toString(36).substring(2, 15);
+      localStorage.setItem('snap2serve_visitor_id', visitorId);
+    }
+
+    const startSession = async () => {
+      try {
+        const sessionDoc = await addDoc(collection(db, 'sessions'), {
+          visitorId,
+          startTime: new Date().toISOString(),
+          createdAt: serverTimestamp()
+        });
+        sessionRef.current = sessionDoc.id;
+      } catch (error) {
+        console.error("Failed to start session", error);
+      }
+    };
+
+    startSession();
+
+    const endSession = async () => {
+      if (sessionRef.current) {
+        const endTime = new Date();
+        const sessionDocRef = doc(db, 'sessions', sessionRef.current);
+        try {
+          const sessionSnap = await getDoc(sessionDocRef);
+          if (sessionSnap.exists()) {
+            const startTime = new Date(sessionSnap.data().startTime);
+            const duration = Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
+            await updateDoc(sessionDocRef, {
+              endTime: endTime.toISOString(),
+              duration: duration
+            });
+          }
+        } catch (error) {
+          console.error("Failed to end session", error);
+        }
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        endSession();
+      }
+    };
+
+    window.addEventListener('visibilitychange', handleVisibilityChange);
+    window.addEventListener('beforeunload', endSession);
+
+    return () => {
+      window.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('beforeunload', endSession);
+      endSession();
+    };
+  }, []);
+
+  // Fetch Analytics
+  useEffect(() => {
+    if (step === 'analytics') {
+      const fetchAnalytics = async () => {
+        try {
+          const querySnapshot = await getDocs(collection(db, 'sessions'));
+          const sessions = querySnapshot.docs.map(doc => doc.data() as Session);
+          
+          const uniqueVisitors = new Set(sessions.map(s => s.visitorId)).size;
+          const sessionsWithDuration = sessions.filter(s => s.duration !== undefined);
+          const totalDuration = sessionsWithDuration.reduce((acc, s) => acc + (s.duration || 0), 0);
+          const avgDuration = sessionsWithDuration.length > 0 ? totalDuration / sessionsWithDuration.length : 0;
+
+          setAnalyticsData({
+            totalVisitors: uniqueVisitors,
+            avgTimeSpent: avgDuration
+          });
+        } catch (error) {
+          handleFirestoreError(error, OperationType.LIST, 'sessions');
+        }
+      };
+      fetchAnalytics();
+    }
+  }, [step]);
+
+  // Test Connection
+  useEffect(() => {
+    const testConnection = async () => {
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+      } catch (error) {
+        if(error instanceof Error && error.message.includes('the client is offline')) {
+          console.error("Please check your Firebase configuration. ");
+        }
+      }
+    };
+    testConnection();
+  }, []);
+
+  const [preferences, setPreferences] = useState<UserPreferences>({
+    dietaryRestrictions: [],
+    allergies: [],
+    maxTime: 45,
+  });
   const [favorites, setFavorites] = useState<Recipe[]>([]);
   const [history, setHistory] = useState<Recipe[]>([]);
   const [isSpeaking, setIsSpeaking] = useState(false);
@@ -161,71 +414,57 @@ const [preferences, setPreferences] = useState<UserPreferences>({
   }, [detectedIngredients]);
 
   useEffect(() => {
-    const savedUser = localStorage.getItem('snap2serve_user');
-    if (savedUser) setUser(JSON.parse(savedUser));
-  }, []);
-
-  useEffect(() => {
-    if (!user) {
+    if (!auth.currentUser || !isAuthReady) {
       setFavorites([]);
       setHistory([]);
       return;
     }
 
-    const fetchUserData = async () => {
-      try {
-        const response = await fetch(`/api/user/data?username=${user.username}`);
-        if (response.ok) {
-          const data = await response.json();
-          setFavorites(data.favorites || []);
-          setHistory(data.history || []);
-        }
-      } catch (error) {
-        console.error("Failed to fetch user data", error);
+    const userDocRef = doc(db, 'users', auth.currentUser.uid);
+    const unsubscribe = onSnapshot(userDocRef, (doc) => {
+      if (doc.exists()) {
+        const data = doc.data();
+        setFavorites(data.favorites || []);
+        setHistory(data.history || []);
       }
-    };
+    }, (error) => {
+      // Don't throw in the snapshot listener to prevent crashes, just log
+      console.error('Snapshot error:', error);
+    });
 
-    fetchUserData();
-  }, [user]);
+    return () => unsubscribe();
+  }, [isAuthReady, auth.currentUser?.uid]);
 
   const toggleFavorite = async (recipe: Recipe) => {
     if (!recipe || !recipe.id) return;
-    if (!user) {
+    if (!auth.currentUser) {
       alert("Please login to save favorites! 💖");
       setIsLoginOpen(true);
       return;
     }
 
+    const userDocRef = doc(db, 'users', auth.currentUser.uid);
     try {
-      const response = await fetch("/api/user/favorites", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: user.username, recipe }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setFavorites(data.favorites);
-      }
+      const existingFavorite = favorites.find(f => f.id === recipe.id);
+      await setDoc(userDocRef, {
+        favorites: existingFavorite ? arrayRemove(existingFavorite) : arrayUnion(recipe)
+      }, { merge: true });
     } catch (error) {
-      console.error("Failed to toggle favorite", error);
+      handleFirestoreError(error, OperationType.UPDATE, `users/${auth.currentUser.uid}`);
     }
   };
 
   const addToHistory = async (recipe: Recipe) => {
-    if (!user) return;
+    if (!recipe || !recipe.id) return;
+    if (!auth.currentUser) return;
 
+    const userDocRef = doc(db, 'users', auth.currentUser.uid);
     try {
-      const response = await fetch("/api/user/history", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: user.username, recipe }),
-      });
-      if (response.ok) {
-        const data = await response.json();
-        setHistory(data.history);
-      }
+      await setDoc(userDocRef, {
+        history: arrayUnion(recipe)
+      }, { merge: true });
     } catch (error) {
-      console.error("Failed to add to history", error);
+      handleFirestoreError(error, OperationType.UPDATE, `users/${auth.currentUser.uid}`);
     }
   };
 
@@ -295,66 +534,132 @@ const [preferences, setPreferences] = useState<UserPreferences>({
     setIsSpeaking(true);
   };
 
-  const renderHome = () => (
-    <motion.div 
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      className="flex flex-col items-center justify-center min-h-[80vh] text-center px-4"
-    >
-      <div className="mb-8 relative">
-        <div className="absolute -inset-4 bg-cute-yellow rounded-full blur-3xl opacity-50 animate-pulse" />
-        <ChefHat className="w-24 h-24 text-cute-pink relative z-10" />
-      </div>
-      <h1 className="text-6xl md:text-8xl font-display mb-6 tracking-tight text-cute-pink">Snap2Serve</h1>
-      <p className="text-lg font-semibold text-gray-600 mt-2">
-  👀 Visitors: {visitorCount}
-</p>
-      <p className="text-xl md:text-2xl text-brand-600 max-w-2xl mb-12 font-display italic">
-        Turn your ingredients into yummy masterpieces with AI! Just snap a photo and start cooking.
-      </p>
+  const renderHome = () => {
+    const doodles = [
+      // Row 1 (Top)
+      { Icon: Carrot, color: 'text-orange-400', top: '5%', left: '5%', delay: 0 },
+      { Icon: Leaf, color: 'text-green-400', top: '5%', left: '20%', delay: 0.3 },
+      { Icon: Pizza, color: 'text-yellow-500', top: '5%', left: '35%', delay: 0.6 },
+      { Icon: Egg, color: 'text-brand-300', top: '5%', left: '65%', delay: 1.2 },
+      { Icon: Cherry, color: 'text-red-400', top: '5%', left: '80%', delay: 1.5 },
+      { Icon: Apple, color: 'text-red-500', top: '5%', left: '95%', delay: 1.8 },
       
-      <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md">
-        <button 
-          onClick={() => fileInputRef.current?.click()}
-          className="flex-1 bg-cute-pink text-white px-8 py-4 rounded-full font-bold text-lg flex items-center justify-center gap-2 hover:scale-105 transition-all shadow-lg hover:shadow-cute-pink/30"
-        >
-          <Camera className="w-6 h-6" />
-          Snap & Cook!
-        </button>
-        <input 
-          type="file" 
-          ref={fileInputRef} 
-          onChange={handleImageUpload} 
-          accept="image/*" 
-          className="hidden" 
-        />
-      </div>
+      // Row 2
+      { Icon: CookingPot, color: 'text-brand-400', top: '25%', left: '10%', delay: 2.1 },
+      { Icon: Soup, color: 'text-orange-300', top: '25%', left: '30%', delay: 2.4 },
+      { Icon: UtensilsCrossed, color: 'text-brand-500', top: '25%', left: '70%', delay: 2.7 },
+      { Icon: Popcorn, color: 'text-yellow-200', top: '25%', left: '90%', delay: 3.0 },
+
+      // Near Snap & Cook Button
+      { Icon: Flame, color: 'text-orange-500', top: '40%', left: '15%', delay: 3.1 },
+      { Icon: Timer, color: 'text-blue-400', top: '40%', left: '85%', delay: 3.2 },
       
-      <div className="mt-16 grid grid-cols-1 md:grid-cols-3 gap-8 text-left max-w-4xl">
-        <div className="p-8 bg-white rounded-[2.5rem] border-4 border-cute-pink/20 shadow-sm hover:border-cute-pink/40 transition-colors">
-          <div className="w-12 h-12 bg-cute-pink/10 rounded-2xl flex items-center justify-center mb-4">
-            <Upload className="w-6 h-6 text-cute-pink" />
-          </div>
-          <h3 className="text-2xl font-display mb-2">1. Upload</h3>
-          <p className="text-brand-600 text-sm">Take a photo of your yummy ingredients!</p>
+      // Row 3 (Middle)
+      { Icon: Coffee, color: 'text-amber-900', top: '50%', left: '5%', delay: 3.3 },
+      { Icon: Sparkles, color: 'text-cute-yellow', top: '50%', left: '95%', delay: 3.6 },
+      
+      // Row 4
+      { Icon: Citrus, color: 'text-yellow-400', top: '75%', left: '10%', delay: 3.9 },
+      { Icon: Grape, color: 'text-purple-400', top: '75%', left: '30%', delay: 4.2 },
+      { Icon: Beef, color: 'text-red-700', top: '75%', left: '70%', delay: 4.5 },
+      { Icon: Fish, color: 'text-blue-400', top: '75%', left: '90%', delay: 4.8 },
+      
+      // Row 5 (Bottom)
+      { Icon: Cookie, color: 'text-amber-600', top: '95%', left: '5%', delay: 5.1 },
+      { Icon: Sandwich, color: 'text-orange-200', top: '95%', left: '20%', delay: 5.4 },
+      { Icon: Drumstick, color: 'text-amber-700', top: '95%', left: '35%', delay: 5.7 },
+      { Icon: Cake, color: 'text-cute-pink', top: '95%', left: '50%', delay: 6.0 },
+      { Icon: Ham, color: 'text-pink-400', top: '95%', left: '65%', delay: 6.3 },
+      { Icon: Croissant, color: 'text-yellow-600', top: '95%', left: '80%', delay: 6.6 },
+      { Icon: IceCream, color: 'text-pink-300', top: '95%', left: '95%', delay: 6.9 },
+    ];
+
+    return (
+      <motion.div 
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        className="flex flex-col items-center justify-center min-h-[80vh] text-center px-4 relative overflow-hidden"
+      >
+        {/* Cute Cooking Doodles */}
+        {doodles.map((doodle, index) => (
+          <motion.div
+            key={index}
+            initial={{ opacity: 0, scale: 0 }}
+            animate={{ 
+              opacity: [0.5, 0.8, 0.5], 
+              scale: [0.95, 1.05, 0.95],
+              y: [0, -15, 0],
+              rotate: [0, 10, -10, 0]
+            }}
+            transition={{ 
+              duration: 6, 
+              repeat: Infinity, 
+              delay: doodle.delay,
+              ease: "easeInOut"
+            }}
+            className={cn("absolute z-0 hidden lg:block", doodle.color)}
+            style={{ 
+              top: doodle.top, 
+              left: doodle.left,
+              transform: 'translate(-50%, -50%)'
+            }}
+          >
+            <doodle.Icon className="w-10 h-10 opacity-60" />
+          </motion.div>
+        ))}
+
+        <div className="mb-8 relative">
+          <div className="absolute -inset-4 bg-cute-yellow rounded-full blur-3xl opacity-50 animate-pulse" />
+          <ChefHat className="w-24 h-24 text-cute-pink relative z-10" />
         </div>
-        <div className="p-8 bg-white rounded-[2.5rem] border-4 border-cute-mint/20 shadow-sm hover:border-cute-mint/40 transition-colors">
-          <div className="w-12 h-12 bg-cute-mint/10 rounded-2xl flex items-center justify-center mb-4">
-            <Clock className="w-6 h-6 text-cute-mint" />
-          </div>
-          <h3 className="text-2xl font-display mb-2">2. Set Time</h3>
-          <p className="text-brand-600 text-sm">How fast do you want to eat? 🕒</p>
+        <h1 className="text-6xl md:text-8xl font-display mb-6 tracking-tight text-cute-pink">Snap2Serve</h1>
+        <p className="text-xl md:text-2xl text-brand-600 max-w-2xl mb-12 font-display italic">
+          Turn your ingredients into yummy masterpieces with AI! Just snap a photo and start cooking.
+        </p>
+        
+        <div className="flex flex-col sm:flex-row gap-4 w-full max-w-md relative z-10">
+          <button 
+            onClick={() => fileInputRef.current?.click()}
+            className="flex-1 bg-cute-pink text-white px-8 py-4 rounded-full font-bold text-lg flex items-center justify-center gap-2 hover:scale-105 transition-all shadow-lg hover:shadow-cute-pink/30"
+          >
+            <Camera className="w-6 h-6" />
+            Snap & Cook!
+          </button>
+          <input 
+            type="file" 
+            ref={fileInputRef} 
+            onChange={handleImageUpload} 
+            accept="image/*" 
+            className="hidden" 
+          />
         </div>
-        <div className="p-8 bg-white rounded-[2.5rem] border-4 border-cute-blue/20 shadow-sm hover:border-cute-blue/40 transition-colors">
-          <div className="w-12 h-12 bg-cute-blue/10 rounded-2xl flex items-center justify-center mb-4">
-            <Utensils className="w-6 h-6 text-cute-blue" />
+        
+        <div className="mt-16 grid grid-cols-1 md:grid-cols-3 gap-8 text-left max-w-4xl relative z-10">
+          <div className="p-8 bg-white rounded-[2.5rem] border-4 border-cute-pink/20 shadow-sm hover:border-cute-pink/40 transition-colors">
+            <div className="w-12 h-12 bg-cute-pink/10 rounded-2xl flex items-center justify-center mb-4">
+              <Upload className="w-6 h-6 text-cute-pink" />
+            </div>
+            <h3 className="text-2xl font-display mb-2">1. Upload</h3>
+            <p className="text-brand-600 text-sm">Take a photo of your yummy ingredients!</p>
           </div>
-          <h3 className="text-2xl font-display mb-2">3. Cook</h3>
-          <p className="text-brand-600 text-sm">Get fun recipes and start your cooking adventure!</p>
+          <div className="p-8 bg-white rounded-[2.5rem] border-4 border-cute-mint/20 shadow-sm hover:border-cute-mint/40 transition-colors">
+            <div className="w-12 h-12 bg-cute-mint/10 rounded-2xl flex items-center justify-center mb-4">
+              <Clock className="w-6 h-6 text-cute-mint" />
+            </div>
+            <h3 className="text-2xl font-display mb-2">2. Set Time</h3>
+            <p className="text-brand-600 text-sm">How fast do you want to eat?</p>
+          </div>
+          <div className="p-8 bg-white rounded-[2.5rem] border-4 border-cute-blue/20 shadow-sm hover:border-cute-blue/40 transition-colors">
+            <div className="w-12 h-12 bg-cute-blue/10 rounded-2xl flex items-center justify-center mb-4">
+              <Utensils className="w-6 h-6 text-cute-blue" />
+            </div>
+            <h3 className="text-2xl font-display mb-2">3. Cook</h3>
+            <p className="text-brand-600 text-sm">Get fun recipes and start your cooking adventure!</p>
+          </div>
         </div>
-      </div>
-    </motion.div>
-  );
+      </motion.div>
+    );
+  };
 
   const renderDetecting = () => (
     <div className="flex flex-col items-center justify-center min-h-[60vh]">
@@ -388,7 +693,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
         <button onClick={() => setStep('home')} className="p-3 bg-white hover:bg-cute-pink/10 rounded-2xl transition-colors shadow-sm">
           <ArrowLeft className="w-6 h-6 text-cute-pink" />
         </button>
-        <h2 className="text-4xl font-display text-cute-pink">Look what we found! ✨</h2>
+        <h2 className="text-4xl font-display text-cute-pink">Look what we found!</h2>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 mb-12">
@@ -456,7 +761,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
             </h3>
             <div className="space-y-6">
               <div>
-                <label className="text-sm font-bold text-brand-500 mb-2 block">How much time? ⏰</label>
+                <label className="text-sm font-bold text-brand-500 mb-2 block">How much time?</label>
                 <div className="flex items-center gap-4">
                   <input 
                     type="range" 
@@ -474,7 +779,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
               <div>
                 <label className="text-sm font-bold text-brand-500 mb-2 block">Special Requests? 🥗</label>
                 <div className="flex flex-wrap gap-2">
-                  {['Vegetarian', 'Vegan', 'Gluten-Free', 'Keto']
+                  {['Less Spicy', 'Vegan', 'Diabetic-Friendly', 'Low-Sodium', 'No Onion', 'No Garlic']
                     .filter(pref => pref !== 'Vegan' || isVeganPossible())
                     .map(pref => (
                     <button
@@ -855,7 +1160,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
                   <Star className="w-12 h-12 text-cute-yellow fill-cute-yellow" />
                 </div>
                 <h2 className="text-4xl font-display text-brand-950 mb-4">Yum! How was it?</h2>
-                <p className="text-brand-500 font-medium mb-10">Rate your masterpiece! 👩‍🍳✨</p>
+                <p className="text-brand-500 font-medium mb-10">Rate your masterpiece! 👩‍🍳</p>
                 
                 <div className="flex justify-center gap-3 mb-12">
                   {[1, 2, 3, 4, 5].map((s) => (
@@ -904,6 +1209,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
             onClick={() => {
               setIsLoginOpen(false);
               setIsSignup(false);
+              setLoginForm({ username: '', email: '', password: '', confirmPassword: '', dob: '' });
             }}
             className="absolute inset-0 bg-brand-950/40 backdrop-blur-md"
           />
@@ -911,13 +1217,14 @@ const [preferences, setPreferences] = useState<UserPreferences>({
             initial={{ scale: 0.9, opacity: 0, y: 20 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.9, opacity: 0, y: 20 }}
-            className="relative bg-white w-full max-w-md rounded-[3.5rem] p-10 shadow-2xl overflow-hidden border-8 border-white"
+            className="relative bg-white w-full max-w-md rounded-[3.5rem] p-10 shadow-2xl overflow-y-auto max-h-[90vh] border-8 border-white"
           >
             <div className="absolute top-0 left-0 w-full h-3 bg-cute-pink" />
             <button 
               onClick={() => {
                 setIsLoginOpen(false);
                 setIsSignup(false);
+                setLoginForm({ username: '', email: '', password: '', confirmPassword: '', dob: '' });
               }}
               className="absolute top-6 right-6 p-2 hover:bg-brand-50 rounded-xl transition-colors"
             >
@@ -929,10 +1236,10 @@ const [preferences, setPreferences] = useState<UserPreferences>({
                 <ChefHat className="w-10 h-10 text-cute-pink" />
               </div>
               <h2 className="text-4xl font-display text-brand-950 mb-2">
-                {isSignup ? "Join Us! 🌈" : "Welcome Back!"}
+                {isSignup ? "Join Us!" : "Welcome Back!"}
               </h2>
               <p className="text-brand-500 font-medium">
-                {isSignup ? "Create your chef profile ✨" : "Join the Snap2Serve family 🌈"}
+                {isSignup ? "Create your chef profile" : "Join the Snap2Serve family"}
               </p>
             </div>
 
@@ -954,19 +1261,33 @@ const [preferences, setPreferences] = useState<UserPreferences>({
               </div>
 
               {isSignup && (
-                <div className="space-y-2">
-                  <label className="text-sm font-bold text-brand-800 ml-2">Email Address</label>
-                  <div className="relative">
-                    <Mail className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-300" />
-                    <input 
-                      type="email" 
-                      placeholder="hello@yummy.com"
-                      value={loginForm.email}
-                      onChange={(e) => setLoginForm({...loginForm, email: e.target.value})}
-                      className="w-full pl-14 pr-6 py-4 bg-brand-50 border-2 border-transparent focus:border-cute-pink focus:bg-white rounded-2xl outline-none transition-all font-medium"
-                    />
+                <>
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-brand-800 ml-2">Email Address</label>
+                    <div className="relative">
+                      <Mail className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-300" />
+                      <input 
+                        type="email" 
+                        placeholder="hello@yummy.com"
+                        value={loginForm.email}
+                        onChange={(e) => setLoginForm({...loginForm, email: e.target.value})}
+                        className="w-full pl-14 pr-6 py-4 bg-brand-50 border-2 border-transparent focus:border-cute-pink focus:bg-white rounded-2xl outline-none transition-all font-medium"
+                      />
+                    </div>
                   </div>
-                </div>
+                  <div className="space-y-2">
+                    <label className="text-sm font-bold text-brand-800 ml-2">Date of Birth</label>
+                    <div className="relative">
+                      <Calendar className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-300" />
+                      <input 
+                        type="date" 
+                        value={loginForm.dob}
+                        onChange={(e) => setLoginForm({...loginForm, dob: e.target.value})}
+                        className="w-full pl-14 pr-6 py-4 bg-brand-50 border-2 border-transparent focus:border-cute-pink focus:bg-white rounded-2xl outline-none transition-all font-medium"
+                      />
+                    </div>
+                  </div>
+                </>
               )}
 
               <div className="space-y-2">
@@ -974,80 +1295,159 @@ const [preferences, setPreferences] = useState<UserPreferences>({
                 <div className="relative">
                   <Lock className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-300" />
                   <input 
-                    type="password" 
+                    type={showPassword ? "text" : "password"} 
                     placeholder="••••••••"
                     value={loginForm.password}
+                    onPaste={(e) => e.preventDefault()}
+                    onCopy={(e) => e.preventDefault()}
+                    onCut={(e) => e.preventDefault()}
+                    onDragStart={(e) => e.preventDefault()}
+                    onDrop={(e) => e.preventDefault()}
+                    autoComplete="new-password"
                     onChange={(e) => setLoginForm({...loginForm, password: e.target.value})}
-                    className="w-full pl-14 pr-6 py-4 bg-brand-50 border-2 border-transparent focus:border-cute-pink focus:bg-white rounded-2xl outline-none transition-all font-medium"
+                    className="w-full pl-14 pr-14 py-4 bg-brand-50 border-2 border-transparent focus:border-cute-pink focus:bg-white rounded-2xl outline-none transition-all font-medium"
                   />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-5 top-1/2 -translate-y-1/2 p-1 hover:bg-brand-100 rounded-lg transition-colors"
+                  >
+                    {showPassword ? <EyeOff className="w-5 h-5 text-brand-400" /> : <Eye className="w-5 h-5 text-brand-400" />}
+                  </button>
                 </div>
+
+                {isSignup && (
+                  <div className="space-y-2 mt-4">
+                    <label className="text-sm font-bold text-brand-800 ml-2">Confirm Password</label>
+                    <div className="relative">
+                      <Shield className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-300" />
+                      <input 
+                        type={showPassword ? "text" : "password"} 
+                        placeholder="••••••••"
+                        value={loginForm.confirmPassword}
+                        onPaste={(e) => e.preventDefault()}
+                        onCopy={(e) => e.preventDefault()}
+                        onCut={(e) => e.preventDefault()}
+                        onDragStart={(e) => e.preventDefault()}
+                        onDrop={(e) => e.preventDefault()}
+                        onChange={(e) => setLoginForm({...loginForm, confirmPassword: e.target.value})}
+                        className="w-full pl-14 pr-6 py-4 bg-brand-50 border-2 border-transparent focus:border-cute-pink focus:bg-white rounded-2xl outline-none transition-all font-medium"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {loginForm.password && (
+                  <div className="mt-4 space-y-3 p-4 bg-brand-50 rounded-2xl border border-brand-100">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-bold text-brand-500 uppercase tracking-wider">Strength</span>
+                      <span className={cn("text-xs font-bold uppercase tracking-wider", getPasswordStrength(loginForm.password).color)}>
+                        {getPasswordStrength(loginForm.password).label}
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full bg-brand-200 rounded-full overflow-hidden">
+                      <motion.div 
+                        initial={{ width: 0 }}
+                        animate={{ width: `${(getPasswordStrength(loginForm.password).score / 5) * 100}%` }}
+                        className={cn("h-full transition-all duration-500", 
+                          getPasswordStrength(loginForm.password).score <= 2 ? "bg-red-500" : 
+                          getPasswordStrength(loginForm.password).score <= 4 ? "bg-yellow-500" : "bg-green-500"
+                        )}
+                      />
+                    </div>
+                    {isSignup && (
+                      <div className="grid grid-cols-1 gap-2 mt-4">
+                        {getPasswordRequirements(loginForm.password).map((req, idx) => (
+                          <div key={idx} className="flex items-center gap-2">
+                            {req.met ? (
+                              <ShieldCheck className="w-4 h-4 text-green-500" />
+                            ) : (
+                              <ShieldAlert className="w-4 h-4 text-brand-300" />
+                            )}
+                            <span className={cn("text-xs font-medium", req.met ? "text-green-600" : "text-brand-400")}>
+                              {req.label}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
-              {/* ✅ ADD THIS BELOW PASSWORD */}
-{isSignup && (
-  <div className="space-y-2">
-    <label className="text-sm font-bold text-brand-800 ml-2">Confirm Password</label>
-    <div className="relative">
-      <Lock className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-300" />
-      <input 
-        type="password"
-        value={loginForm.confirmPassword}
-        onChange={(e) => setLoginForm({...loginForm, confirmPassword: e.target.value})}
-      />
-    </div>
-
-    {/* Match check */}
-    {loginForm.confirmPassword && (
-      <p className={`text-sm ml-2 ${
-        loginForm.password === loginForm.confirmPassword 
-          ? "text-green-500" 
-          : "text-red-500"
-      }`}>
-        {loginForm.password === loginForm.confirmPassword 
-          ? "Passwords match ✅" 
-          : "Passwords do not match ❌"}
-      </p>
-    )}
-  </div>
-)}
-              {loginForm.password && (
-  <div className="mt-2 ml-2">
-    <p className={`text-sm font-bold ${passwordStrength.color}`}>
-      Strength: {passwordStrength.label}
-    </p>
-    <p className="text-xs text-gray-500">
-      Must contain 8+ characters, uppercase, number & special symbol
-    </p>
-  </div>
-)}
-
               <button 
-                if (isSignup && loginForm.password !== loginForm.confirmPassword) {
-  alert("Passwords do not match!");
-  return;
-}
                 onClick={async () => {
-                  const endpoint = isSignup ? "/api/auth/signup" : "/api/auth/login";
+                  // Security Restrictions (Applies to both Login and Signup)
+                  if (loginForm.password && loginForm.username && loginForm.password === loginForm.username) {
+                    alert("Password cannot be the same as username! 🛡️");
+                    return;
+                  }
+
+                  if (isSignup) {
+                    if (loginForm.dob && loginForm.password.includes(loginForm.dob.replace(/-/g, ''))) {
+                      alert("Password should not contain your birth date! 🛡️");
+                      return;
+                    }
+                    
+                    if (loginForm.password !== loginForm.confirmPassword) {
+                      alert("Passwords do not match! 🛡️");
+                      return;
+                    }
+
+                    const passwordError = validatePassword(loginForm.password);
+                    if (passwordError) {
+                      alert(passwordError + " 🛡️");
+                      return;
+                    }
+                  }
+
                   setAuthLoading(true);
                   try {
-                    const response = await fetch(endpoint, {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify(loginForm),
-                    });
-                    const data = await response.json();
-                    if (response.ok) {
-                      setUser(data);
-                      localStorage.setItem('snap2serve_user', JSON.stringify(data));
-                      alert(`Welcome, ${data.username}! Happy cooking! 🍳✨`);
-                      setIsLoginOpen(false);
-                      setIsSignup(false);
+                    if (isSignup) {
+                      const userCredential = await createUserWithEmailAndPassword(auth, loginForm.email, loginForm.password);
+                      await updateProfile(userCredential.user, { displayName: loginForm.username });
+                      
+                      // Create user document in Firestore
+                      // CRITICAL: We NEVER store the password in the database.
+                      await setDoc(doc(db, 'users', userCredential.user.uid), {
+                        username: loginForm.username,
+                        email: loginForm.email,
+                        dob: loginForm.dob,
+                        favorites: [],
+                        history: [],
+                        createdAt: serverTimestamp()
+                      });
+
+                      alert(`Welcome, ${loginForm.username}! Happy cooking! 🍳`);
                     } else {
-                      alert(data.error || "Authentication failed. Please try again.");
+                      // For login, we need to handle username vs email. 
+                      // Firebase Auth uses email. If user entered username, we'd need a mapping.
+                      // For simplicity, let's assume email for now or check if it's an email.
+                      const isEmail = loginForm.username.includes('@');
+                      let email = loginForm.username;
+                      
+                      if (!isEmail) {
+                        // Try to find email by username in Firestore
+                        const usersRef = collection(db, 'users');
+                        const q = query(usersRef, orderBy('username'), limit(100)); // Simple search
+                        const querySnapshot = await getDocs(q);
+                        const userDoc = querySnapshot.docs.find(doc => doc.data().username === loginForm.username);
+                        if (userDoc) {
+                          email = userDoc.data().email;
+                        } else {
+                          throw new Error("Username not found. Please use email.");
+                        }
+                      }
+                      
+                      await signInWithEmailAndPassword(auth, email, loginForm.password);
+                      alert(`Welcome back! Happy cooking! 🍳`);
                     }
-                  } catch (error) {
+                    setIsLoginOpen(false);
+                    setIsSignup(false);
+                    setLoginForm({ username: '', email: '', password: '', confirmPassword: '', dob: '' });
+                  } catch (error: any) {
                     console.error("Auth error", error);
-                    alert("An error occurred during authentication.");
+                    alert(error.message || "Authentication failed. Please try again.");
                   } finally {
                     setAuthLoading(false);
                   }
@@ -1062,7 +1462,10 @@ const [preferences, setPreferences] = useState<UserPreferences>({
               <p className="text-center text-sm text-brand-400 font-medium">
                 {isSignup ? "Already have an account?" : "Don't have an account?"} 
                 <button 
-                  onClick={() => setIsSignup(!isSignup)}
+                  onClick={() => {
+                    setIsSignup(!isSignup);
+                    setLoginForm({ username: '', email: '', password: '', confirmPassword: '', dob: '' });
+                  }}
                   className="text-cute-pink font-bold hover:underline ml-1"
                 >
                   {isSignup ? "Sign In" : "Sign Up"}
@@ -1103,6 +1506,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
                 className="bg-white rounded-[2.5rem] overflow-hidden border-4 border-white shadow-lg hover:shadow-2xl transition-all cursor-pointer flex flex-col group"
                 onClick={() => {
                   setSelectedRecipe(recipe);
+                  addToHistory(recipe);
                   setStep('detail');
                 }}
               >
@@ -1241,7 +1645,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
           <button onClick={() => setStep('home')} className="p-3 bg-white hover:bg-cute-pink/10 rounded-2xl transition-colors shadow-sm">
             <ArrowLeft className="w-6 h-6 text-cute-pink" />
           </button>
-          <h2 className="text-4xl font-display text-cute-pink">Explore Trending Recipes 🌈</h2>
+          <h2 className="text-4xl font-display text-cute-pink">Explore Trending Recipes</h2>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
@@ -1251,7 +1655,9 @@ const [preferences, setPreferences] = useState<UserPreferences>({
               whileHover={{ y: -10 }}
               className="bg-white rounded-[2.5rem] overflow-hidden border-4 border-white shadow-lg flex flex-col cursor-pointer group"
               onClick={() => {
-                setSelectedRecipe(item as any);
+                const recipe = item as any;
+                setSelectedRecipe(recipe);
+                addToHistory(recipe);
                 setStep('detail');
               }}
             >
@@ -1315,6 +1721,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
               className="bg-white rounded-[2.5rem] overflow-hidden border-4 border-white shadow-lg hover:shadow-2xl transition-all cursor-pointer flex flex-col group"
               onClick={() => {
                 setSelectedRecipe(recipe);
+                addToHistory(recipe);
                 setStep('detail');
               }}
             >
@@ -1350,6 +1757,63 @@ const [preferences, setPreferences] = useState<UserPreferences>({
     </motion.div>
   );
 
+  const renderAnalytics = () => (
+    <motion.div 
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      className="max-w-4xl mx-auto px-4 py-12"
+    >
+      <div className="flex items-center gap-4 mb-12">
+        <button onClick={() => setStep('home')} className="p-3 bg-white hover:bg-cute-pink/10 rounded-2xl transition-colors shadow-sm">
+          <ArrowLeft className="w-6 h-6 text-cute-pink" />
+        </button>
+        <h2 className="text-4xl font-display text-cute-pink">Website Analytics 📊</h2>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div className="bg-white p-10 rounded-[3rem] border-4 border-cute-pink/20 shadow-xl flex flex-col items-center text-center">
+          <div className="w-20 h-20 bg-cute-pink/10 rounded-3xl flex items-center justify-center mb-6">
+            <Users className="w-10 h-10 text-cute-pink" />
+          </div>
+          <h3 className="text-2xl font-display text-brand-900 mb-2">Total Unique Visitors</h3>
+          <div className="text-6xl font-display text-cute-pink">
+            {analyticsData ? analyticsData.totalVisitors : <Loader2 className="w-12 h-12 animate-spin mx-auto" />}
+          </div>
+          <p className="text-brand-500 mt-4 font-medium italic">People who discovered Snap2Serve!</p>
+        </div>
+
+        <div className="bg-white p-10 rounded-[3rem] border-4 border-cute-blue/20 shadow-xl flex flex-col items-center text-center">
+          <div className="w-20 h-20 bg-cute-blue/10 rounded-3xl flex items-center justify-center mb-6">
+            <Timer className="w-10 h-10 text-cute-blue" />
+          </div>
+          <h3 className="text-2xl font-display text-brand-900 mb-2">Avg. Time Spent</h3>
+          <div className="text-6xl font-display text-cute-blue">
+            {analyticsData ? (
+              analyticsData.avgTimeSpent < 60 
+                ? `${Math.round(analyticsData.avgTimeSpent)}s`
+                : `${Math.round(analyticsData.avgTimeSpent / 60)}m ${Math.round(analyticsData.avgTimeSpent % 60)}s`
+            ) : (
+              <Loader2 className="w-12 h-12 animate-spin mx-auto" />
+            )}
+          </div>
+          <p className="text-brand-500 mt-4 font-medium italic">Average duration of a yummy session!</p>
+        </div>
+      </div>
+
+      <div className="mt-12 bg-white p-10 rounded-[3rem] border-4 border-cute-mint/20 shadow-sm">
+        <h3 className="text-2xl font-display mb-6 text-cute-mint flex items-center gap-2">
+          <BarChart3 className="w-6 h-6" />
+          Analytics Insights
+        </h3>
+        <p className="text-brand-700 leading-relaxed">
+          We track visitor sessions to understand how people interact with our AI chef. 
+          This helps us improve the experience and make Snap2Serve the best cooking companion for you! 
+          All data is anonymized and used only for improving our yummy recipes.
+        </p>
+      </div>
+    </motion.div>
+  );
+
   return (
     <div className="min-h-screen bg-brand-50 selection:bg-brand-200">
       <nav className="px-6 py-8 max-w-7xl mx-auto flex items-center justify-between">
@@ -1367,30 +1831,42 @@ const [preferences, setPreferences] = useState<UserPreferences>({
           <button 
             onClick={() => setStep('home')}
             className={cn(
-              "text-sm font-bold transition-colors",
+              "flex items-center gap-2 text-sm font-bold transition-colors",
               step === 'home' ? "text-cute-pink" : "text-brand-600 hover:text-cute-pink"
             )}
           >
-            Home 🏠
+            <Home className="w-4 h-4" />
+            Home
           </button>
           <button 
             onClick={() => setStep('explore')}
             className={cn(
-              "text-sm font-bold transition-colors",
+              "flex items-center gap-2 text-sm font-bold transition-colors",
               step === 'explore' ? "text-cute-pink" : "text-brand-600 hover:text-cute-pink"
             )}
           >
-            Explore 🌈
+            <Compass className="w-4 h-4" />
+            Explore
           </button>
           <button 
             onClick={() => setStep('favorites')}
             className={cn(
-              "text-sm font-bold transition-colors flex items-center gap-2",
+              "flex items-center gap-2 text-sm font-bold transition-colors",
               step === 'favorites' ? "text-cute-pink" : "text-brand-600 hover:text-cute-pink"
             )}
           >
             <Heart className={cn("w-4 h-4", favorites.length > 0 && "fill-cute-pink text-cute-pink")} />
             Favorites ({favorites.length})
+          </button>
+          <button 
+            onClick={() => setStep('analytics')}
+            className={cn(
+              "flex items-center gap-2 text-sm font-bold transition-colors",
+              step === 'analytics' ? "text-cute-pink" : "text-brand-600 hover:text-cute-pink"
+            )}
+          >
+            <BarChart3 className="w-4 h-4" />
+            Analytics
           </button>
         </div>
 
@@ -1428,6 +1904,15 @@ const [preferences, setPreferences] = useState<UserPreferences>({
             </button>
           )}
           <button 
+            onClick={() => {
+              signOut(auth);
+              setUser(null);
+            }}
+            className="hidden" // Hidden but kept for logic reference if needed
+          >
+            Sign Out
+          </button>
+          <button 
             onClick={() => setStep('history')}
             className={cn(
               "w-12 h-12 rounded-2xl flex items-center justify-center transition-colors shadow-sm",
@@ -1441,6 +1926,52 @@ const [preferences, setPreferences] = useState<UserPreferences>({
 
       {renderLoginModal()}
 
+      {/* Mobile Bottom Navigation */}
+      {!['detecting', 'cooking'].includes(step) && (
+        <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white/80 backdrop-blur-xl border-t border-brand-100 px-6 py-4 flex items-center justify-around z-50">
+          <button 
+            onClick={() => setStep('home')}
+            className={cn(
+              "flex flex-col items-center gap-1 transition-colors",
+              step === 'home' ? "text-cute-pink" : "text-brand-400"
+            )}
+          >
+            <Home className="w-6 h-6" />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Home</span>
+          </button>
+          <button 
+            onClick={() => setStep('explore')}
+            className={cn(
+              "flex flex-col items-center gap-1 transition-colors",
+              step === 'explore' ? "text-cute-pink" : "text-brand-400"
+            )}
+          >
+            <Compass className="w-6 h-6" />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Explore</span>
+          </button>
+          <button 
+            onClick={() => setStep('favorites')}
+            className={cn(
+              "flex flex-col items-center gap-1 transition-colors",
+              step === 'favorites' ? "text-cute-pink" : "text-brand-400"
+            )}
+          >
+            <Heart className={cn("w-6 h-6", favorites.length > 0 && "fill-cute-pink")} />
+            <span className="text-[10px] font-bold uppercase tracking-widest">Favs</span>
+          </button>
+          <button 
+            onClick={() => setStep('history')}
+            className={cn(
+              "flex flex-col items-center gap-1 transition-colors",
+              step === 'history' ? "text-cute-pink" : "text-brand-400"
+            )}
+          >
+            <History className="w-6 h-6" />
+            <span className="text-[10px] font-bold uppercase tracking-widest">History</span>
+          </button>
+        </div>
+      )}
+
       <main className="pb-24">
         <AnimatePresence mode="wait">
           {step === 'home' && renderHome()}
@@ -1452,6 +1983,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
           {step === 'favorites' && renderFavorites()}
           {step === 'explore' && renderExplore()}
           {step === 'cooking' && renderCooking()}
+          {step === 'analytics' && renderAnalytics()}
         </AnimatePresence>
       </main>
 
@@ -1463,7 +1995,7 @@ const [preferences, setPreferences] = useState<UserPreferences>({
               <span className="text-2xl font-display font-bold text-cute-pink">Snap2Serve</span>
             </div>
             <p className="text-brand-600 max-w-sm font-display text-lg italic">
-              Making cooking fun and easy for everyone! 🌈 Reducing food waste with a little bit of AI magic.
+              Making cooking fun and easy for everyone! Reducing food waste with a little bit of AI magic.
             </p>
           </div>
           <div>
@@ -1495,5 +2027,3 @@ const [preferences, setPreferences] = useState<UserPreferences>({
     </div>
   );
 }
-
-
