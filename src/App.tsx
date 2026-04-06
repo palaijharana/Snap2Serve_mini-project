@@ -1,6 +1,17 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
+  LineChart, 
+  Line, 
+  XAxis, 
+  YAxis, 
+  CartesianGrid, 
+  Tooltip, 
+  ResponsiveContainer,
+  AreaChart,
+  Area
+} from 'recharts';
+import { 
   Camera, 
   Upload, 
   Clock, 
@@ -61,7 +72,8 @@ import {
   Popcorn,
   Coffee,
   UtensilsCrossed,
-  Cake
+  Cake,
+  TrendingUp
 } from 'lucide-react';
 import { Recipe, Ingredient, UserPreferences, Session, AnalyticsData } from './types';
 import { detectIngredients, generateRecipes, generateSpeech } from './services/geminiService';
@@ -72,7 +84,8 @@ import {
   createUserWithEmailAndPassword, 
   onAuthStateChanged, 
   signOut,
-  updateProfile
+  updateProfile,
+  sendPasswordResetEmail
 } from 'firebase/auth';
 import { 
   collection, 
@@ -190,12 +203,14 @@ export default function App() {
   const [isLoginOpen, setIsLoginOpen] = useState(false);
   const [isSignup, setIsSignup] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
-  const [user, setUser] = useState<{ username: string; email: string; dob?: string } | null>(null);
+  const [user, setUser] = useState<{ username: string; email: string; role?: string; dob?: string } | null>(null);
   const [loginForm, setLoginForm] = useState({ username: '', email: '', password: '', confirmPassword: '', dob: '' });
   const [showPassword, setShowPassword] = useState(false);
   const [showRating, setShowRating] = useState(false);
   const [analyticsData, setAnalyticsData] = useState<AnalyticsData | null>(null);
   const [isAuthReady, setIsAuthReady] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [resetSent, setResetSent] = useState(false);
   const sessionRef = useRef<string | null>(null);
 
   const getPasswordStrength = (password: string) => {
@@ -218,6 +233,10 @@ export default function App() {
       return "Password must be at least 8 characters and include uppercase, lowercase, number, and special character.";
     }
     return null;
+  };
+
+  const isValidEmail = (email: string) => {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
   };
 
   const getPasswordRequirements = (password: string) => {
@@ -257,61 +276,126 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
       if (firebaseUser) {
-        // Fetch additional user data from Firestore if needed
-        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-        if (userDoc.exists()) {
-          const userData = userDoc.data();
+        const userDocRef = doc(db, 'users', firebaseUser.uid);
+        const userDoc = await getDoc(userDocRef);
+        const userData = userDoc.exists() ? userDoc.data() : null;
+        
+        // Check if document needs repair (missing required fields for security rules)
+        const needsRepair = userData && (
+          !userData.username || 
+          !userData.email || 
+          !userData.favorites || 
+          !userData.history || 
+          !userData.createdAt
+        );
+
+        const isAdminEmail = (email: string | null) => {
+          return email === 'pranati.parandkar@gmail.com' || email === 'palaijharana98@gmail.com';
+        };
+
+        if (!userDoc.exists() || needsRepair || (isAdminEmail(firebaseUser.email) && (userData?.role !== 'admin'))) {
+          const updatedUser = {
+            username: firebaseUser.email === 'pranati.parandkar@gmail.com' ? 'Pranati' : 
+                      (firebaseUser.email === 'palaijharana98@gmail.com' ? 'Admin ABC' : 
+                      (userData?.username || firebaseUser.displayName || 'Chef')),
+            email: userData?.email || firebaseUser.email || '',
+            role: isAdminEmail(firebaseUser.email) ? 'admin' : (userData?.role || 'client'),
+            favorites: userData?.favorites || [],
+            history: userData?.history || [],
+            createdAt: userData?.createdAt || serverTimestamp()
+          };
+          try {
+            // Use setDoc with merge to preserve other fields like 'role' or 'dob'
+            await setDoc(userDocRef, updatedUser, { merge: true });
+            setUser({
+              username: updatedUser.username,
+              email: updatedUser.email,
+              role: updatedUser.role,
+              dob: userData?.dob
+            });
+          } catch (error) {
+            console.error("Failed to initialize/repair user document", error);
+          }
+        } else if (userData) {
           setUser({
-            username: userData.username || firebaseUser.displayName || 'Chef',
-            email: firebaseUser.email || '',
+            username: userData.username,
+            email: userData.email,
+            role: userData.role || 'client',
             dob: userData.dob
           });
-        } else {
-          setUser({
-            username: firebaseUser.displayName || 'Chef',
-            email: firebaseUser.email || '',
-          });
+        }
+
+        // Update current session with UID if it exists
+        if (sessionRef.current) {
+          try {
+            await updateDoc(doc(db, 'sessions', sessionRef.current), {
+              uid: firebaseUser.uid
+            });
+          } catch (error) {
+            // Silently fail as this is just tracking
+          }
         }
       } else {
         setUser(null);
+        // Clear UID from current session if it exists
+        if (sessionRef.current) {
+          try {
+            await updateDoc(doc(db, 'sessions', sessionRef.current), {
+              uid: null
+            });
+          } catch (error) {
+            // Silently fail
+          }
+        }
       }
       setIsAuthReady(true);
     });
     return () => unsubscribe();
   }, []);
 
-  // Visitor Tracking
   useEffect(() => {
     let visitorId = localStorage.getItem('snap2serve_visitor_id');
+  
     if (!visitorId) {
       visitorId = 'visitor_' + Math.random().toString(36).substring(2, 15);
       localStorage.setItem('snap2serve_visitor_id', visitorId);
     }
-
+  
     const startSession = async () => {
       try {
         const sessionDoc = await addDoc(collection(db, 'sessions'), {
           visitorId,
+          uid: auth.currentUser?.uid || null,
           startTime: new Date().toISOString(),
           createdAt: serverTimestamp()
         });
+  
         sessionRef.current = sessionDoc.id;
+  
+        // ✅ MongoDB call
+        await fetch("http://localhost:3000/api/visit", {
+          method: "POST",
+        });
+  
       } catch (error) {
         console.error("Failed to start session", error);
       }
     };
-
-    startSession();
-
+  
     const endSession = async () => {
       if (sessionRef.current) {
         const endTime = new Date();
         const sessionDocRef = doc(db, 'sessions', sessionRef.current);
+  
         try {
           const sessionSnap = await getDoc(sessionDocRef);
+  
           if (sessionSnap.exists()) {
             const startTime = new Date(sessionSnap.data().startTime);
-            const duration = Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
+            const duration = Math.floor(
+              (endTime.getTime() - startTime.getTime()) / 1000
+            );
+  
             await updateDoc(sessionDocRef, {
               endTime: endTime.toISOString(),
               duration: duration
@@ -322,39 +406,64 @@ export default function App() {
         }
       }
     };
-
+  
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'hidden') {
         endSession();
       }
     };
-
+  
+    // ▶ START SESSION
+    startSession();
+  
+    // ▶ ADD LISTENERS
     window.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('beforeunload', endSession);
-
+  
+    // ▶ CLEANUP
     return () => {
       window.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('beforeunload', endSession);
       endSession();
     };
-  }, []);
+  
+  }, [auth.currentUser?.uid]);
 
   // Fetch Analytics
   useEffect(() => {
     if (step === 'analytics') {
       const fetchAnalytics = async () => {
+        // Only admins should be able to fetch analytics
+        const isAdmin = user?.role === 'admin' || user?.email === 'pranati.parandkar@gmail.com' || user?.email === 'palaijharana98@gmail.com';
+        if (!isAdmin) {
+          setStep('home');
+          return;
+        }
+        
         try {
           const querySnapshot = await getDocs(collection(db, 'sessions'));
           const sessions = querySnapshot.docs.map(doc => doc.data() as Session);
           
+          const totalVisits = sessions.length;
           const uniqueVisitors = new Set(sessions.map(s => s.visitorId)).size;
           const sessionsWithDuration = sessions.filter(s => s.duration !== undefined);
           const totalDuration = sessionsWithDuration.reduce((acc, s) => acc + (s.duration || 0), 0);
           const avgDuration = sessionsWithDuration.length > 0 ? totalDuration / sessionsWithDuration.length : 0;
 
+          const visitsByDay: Record<string, number> = {};
+          sessions.forEach(s => {
+            const date = new Date(s.startTime).toLocaleDateString();
+            visitsByDay[date] = (visitsByDay[date] || 0) + 1;
+          });
+          const visitsPerDay = Object.entries(visitsByDay)
+            .map(([date, count]) => ({ date, count }))
+            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
           setAnalyticsData({
             totalVisitors: uniqueVisitors,
-            avgTimeSpent: avgDuration
+            totalVisits: totalVisits,
+            avgTimeSpent: avgDuration,
+            visitsPerDay
           });
         } catch (error) {
           handleFirestoreError(error, OperationType.LIST, 'sessions');
@@ -414,9 +523,21 @@ export default function App() {
   }, [detectedIngredients]);
 
   useEffect(() => {
-    if (!auth.currentUser || !isAuthReady) {
+    if (!isAuthReady) return;
+
+    if (!auth.currentUser) {
       setFavorites([]);
-      setHistory([]);
+      // Load guest history from localStorage
+      const guestHistory = localStorage.getItem('snap2serve_guest_history');
+      if (guestHistory) {
+        try {
+          setHistory(JSON.parse(guestHistory));
+        } catch (e) {
+          setHistory([]);
+        }
+      } else {
+        setHistory([]);
+      }
       return;
     }
 
@@ -428,12 +549,11 @@ export default function App() {
         setHistory(data.history || []);
       }
     }, (error) => {
-      // Don't throw in the snapshot listener to prevent crashes, just log
-      console.error('Snapshot error:', error);
+      handleFirestoreError(error, OperationType.GET, `users/${auth.currentUser?.uid}`);
     });
 
     return () => unsubscribe();
-  }, [isAuthReady, auth.currentUser?.uid]);
+  }, [isAuthReady, auth.currentUser]);
 
   const toggleFavorite = async (recipe: Recipe) => {
     if (!recipe || !recipe.id) return;
@@ -445,9 +565,10 @@ export default function App() {
 
     const userDocRef = doc(db, 'users', auth.currentUser.uid);
     try {
-      const existingFavorite = favorites.find(f => f.id === recipe.id);
+      const isFavorite = favorites.some(f => f.id === recipe.id);
+      // Use setDoc with merge: true to ensure the document exists
       await setDoc(userDocRef, {
-        favorites: existingFavorite ? arrayRemove(existingFavorite) : arrayUnion(recipe)
+        favorites: isFavorite ? arrayRemove(recipe) : arrayUnion(recipe)
       }, { merge: true });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `users/${auth.currentUser.uid}`);
@@ -455,13 +576,22 @@ export default function App() {
   };
 
   const addToHistory = async (recipe: Recipe) => {
-    if (!recipe || !recipe.id) return;
-    if (!auth.currentUser) return;
+    // 1. Update local state immediately for both guests and logged-in users
+    const updatedHistory = [recipe, ...history.filter(r => r.id !== recipe.id)].slice(0, 50);
+    setHistory(updatedHistory);
 
+    // 2. If guest, save to localStorage
+    if (!auth.currentUser) {
+      localStorage.setItem('snap2serve_guest_history', JSON.stringify(updatedHistory));
+      return;
+    }
+
+    // 3. If logged in, save to Firestore
     const userDocRef = doc(db, 'users', auth.currentUser.uid);
     try {
+      // We save the whole array to maintain order and uniqueness (moving to front)
       await setDoc(userDocRef, {
-        history: arrayUnion(recipe)
+        history: updatedHistory
       }, { merge: true });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, `users/${auth.currentUser.uid}`);
@@ -504,7 +634,14 @@ export default function App() {
     try {
       const ingredientNames = detectedIngredients.map(i => i.name);
       const generated = await generateRecipes(ingredientNames, preferences);
-      setRecipes(generated);
+      // Ensure unique IDs for each recipe to avoid favorites/history bugs
+      const recipesWithUniqueIds = generated.map((recipe, index) => ({
+        ...recipe,
+        id: recipe.id === 'a-truly-unique-string-id' || !recipe.id 
+          ? `recipe_${Date.now()}_${index}_${Math.random().toString(36).substr(2, 9)}`
+          : recipe.id
+      }));
+      setRecipes(recipesWithUniqueIds);
       setStep('recipes');
     } catch (error) {
       console.error(error);
@@ -1244,15 +1381,35 @@ export default function App() {
             </div>
 
             <div className="space-y-6">
+              {resetSent && (
+                <motion.div 
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-4 bg-green-50 border-2 border-green-100 rounded-2xl flex items-center gap-3 text-green-600 text-sm font-bold"
+                >
+                  <ShieldCheck className="w-5 h-5 flex-shrink-0" />
+                  Password reset email sent! Check your inbox. 📧
+                </motion.div>
+              )}
+              {authError && (
+                <motion.div 
+                  initial={{ opacity: 0, y: -10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-4 bg-red-50 border-2 border-red-100 rounded-2xl flex items-center gap-3 text-red-600 text-sm font-bold"
+                >
+                  <ShieldAlert className="w-5 h-5 flex-shrink-0" />
+                  {authError}
+                </motion.div>
+              )}
               <div className="space-y-2">
                 <label className="text-sm font-bold text-brand-800 ml-2">
-                  {isSignup ? "Username" : "Username or Email"}
+                  {isSignup ? "Username" : "Email Address"}
                 </label>
                 <div className="relative">
-                  <User className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-300" />
+                  {isSignup ? <User className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-300" /> : <Mail className="absolute left-5 top-1/2 -translate-y-1/2 w-5 h-5 text-brand-300" />}
                   <input 
                     type="text" 
-                    placeholder={isSignup ? "ChefYummy" : "ChefYummy or hello@yummy.com"}
+                    placeholder={isSignup ? "ChefYummy" : "hello@yummy.com"}
                     value={loginForm.username}
                     onChange={(e) => setLoginForm({...loginForm, username: e.target.value})}
                     className="w-full pl-14 pr-6 py-4 bg-brand-50 border-2 border-transparent focus:border-cute-pink focus:bg-white rounded-2xl outline-none transition-all font-medium"
@@ -1316,6 +1473,35 @@ export default function App() {
                   </button>
                 </div>
 
+                {!isSignup && (
+                  <div className="flex justify-end mt-2">
+                    <button 
+                      onClick={async () => {
+                        if (!loginForm.username) {
+                          setAuthError("Please enter your email address first! 📧");
+                          return;
+                        }
+                        if (!isValidEmail(loginForm.username)) {
+                          setAuthError("Please enter a valid email address! 📧");
+                          return;
+                        }
+                        try {
+                          await sendPasswordResetEmail(auth, loginForm.username);
+                          setResetSent(true);
+                          setAuthError(null);
+                          setTimeout(() => setResetSent(false), 5000);
+                        } catch (error: any) {
+                          console.error("Reset error", error);
+                          setAuthError("Failed to send reset email. Please try again.");
+                        }
+                      }}
+                      className="text-xs font-bold text-cute-pink hover:underline"
+                    >
+                      Forgot Password?
+                    </button>
+                  </div>
+                )}
+
                 {isSignup && (
                   <div className="space-y-2 mt-4">
                     <label className="text-sm font-bold text-brand-800 ml-2">Confirm Password</label>
@@ -1377,26 +1563,46 @@ export default function App() {
 
               <button 
                 onClick={async () => {
+                  setAuthError(null);
                   // Security Restrictions (Applies to both Login and Signup)
                   if (loginForm.password && loginForm.username && loginForm.password === loginForm.username) {
-                    alert("Password cannot be the same as username! 🛡️");
+                    setAuthError("Password cannot be the same as username! 🛡️");
                     return;
                   }
 
                   if (isSignup) {
+                    if (!loginForm.email || !loginForm.username || !loginForm.password) {
+                      setAuthError("Please fill in all required fields! 🍳");
+                      return;
+                    }
+
+                    if (!isValidEmail(loginForm.email)) {
+                      setAuthError("Please enter a valid email address! 📧");
+                      return;
+                    }
+
                     if (loginForm.dob && loginForm.password.includes(loginForm.dob.replace(/-/g, ''))) {
-                      alert("Password should not contain your birth date! 🛡️");
+                      setAuthError("Password should not contain your birth date! 🛡️");
                       return;
                     }
                     
                     if (loginForm.password !== loginForm.confirmPassword) {
-                      alert("Passwords do not match! 🛡️");
+                      setAuthError("Passwords do not match! 🛡️");
                       return;
                     }
 
                     const passwordError = validatePassword(loginForm.password);
                     if (passwordError) {
-                      alert(passwordError + " 🛡️");
+                      setAuthError(passwordError + " 🛡️");
+                      return;
+                    }
+                  } else {
+                    if (!loginForm.username || !loginForm.password) {
+                      setAuthError("Please enter your email and password! 🍳");
+                      return;
+                    }
+                    if (!isValidEmail(loginForm.username)) {
+                      setAuthError("Please enter a valid email address! 📧");
                       return;
                     }
                   }
@@ -1408,7 +1614,6 @@ export default function App() {
                       await updateProfile(userCredential.user, { displayName: loginForm.username });
                       
                       // Create user document in Firestore
-                      // CRITICAL: We NEVER store the password in the database.
                       await setDoc(doc(db, 'users', userCredential.user.uid), {
                         username: loginForm.username,
                         email: loginForm.email,
@@ -1417,37 +1622,23 @@ export default function App() {
                         history: [],
                         createdAt: serverTimestamp()
                       });
-
-                      alert(`Welcome, ${loginForm.username}! Happy cooking! 🍳`);
                     } else {
-                      // For login, we need to handle username vs email. 
-                      // Firebase Auth uses email. If user entered username, we'd need a mapping.
-                      // For simplicity, let's assume email for now or check if it's an email.
-                      const isEmail = loginForm.username.includes('@');
-                      let email = loginForm.username;
-                      
-                      if (!isEmail) {
-                        // Try to find email by username in Firestore
-                        const usersRef = collection(db, 'users');
-                        const q = query(usersRef, orderBy('username'), limit(100)); // Simple search
-                        const querySnapshot = await getDocs(q);
-                        const userDoc = querySnapshot.docs.find(doc => doc.data().username === loginForm.username);
-                        if (userDoc) {
-                          email = userDoc.data().email;
-                        } else {
-                          throw new Error("Username not found. Please use email.");
-                        }
-                      }
-                      
+                      // For login, we use the username field as email
+                      const email = loginForm.username;
                       await signInWithEmailAndPassword(auth, email, loginForm.password);
-                      alert(`Welcome back! Happy cooking! 🍳`);
                     }
                     setIsLoginOpen(false);
                     setIsSignup(false);
                     setLoginForm({ username: '', email: '', password: '', confirmPassword: '', dob: '' });
                   } catch (error: any) {
                     console.error("Auth error", error);
-                    alert(error.message || "Authentication failed. Please try again.");
+                    let message = "Authentication failed. Please try again.";
+                    if (error.code === 'auth/user-not-found') message = "User not found. Please check your email.";
+                    if (error.code === 'auth/wrong-password') message = "Incorrect password. Please try again.";
+                    if (error.code === 'auth/email-already-in-use') message = "Email already in use. Try signing in!";
+                    if (error.code === 'auth/weak-password') message = "Password is too weak.";
+                    if (error.code === 'auth/invalid-email') message = "Please enter a valid email address.";
+                    setAuthError(message);
                   } finally {
                     setAuthLoading(false);
                   }
@@ -1464,6 +1655,7 @@ export default function App() {
                 <button 
                   onClick={() => {
                     setIsSignup(!isSignup);
+                    setAuthError(null);
                     setLoginForm({ username: '', email: '', password: '', confirmPassword: '', dob: '' });
                   }}
                   className="text-cute-pink font-bold hover:underline ml-1"
@@ -1655,9 +1847,7 @@ export default function App() {
               whileHover={{ y: -10 }}
               className="bg-white rounded-[2.5rem] overflow-hidden border-4 border-white shadow-lg flex flex-col cursor-pointer group"
               onClick={() => {
-                const recipe = item as any;
-                setSelectedRecipe(recipe);
-                addToHistory(recipe);
+                setSelectedRecipe(item as any);
                 setStep('detail');
               }}
             >
@@ -1770,33 +1960,99 @@ export default function App() {
         <h2 className="text-4xl font-display text-cute-pink">Website Analytics 📊</h2>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-        <div className="bg-white p-10 rounded-[3rem] border-4 border-cute-pink/20 shadow-xl flex flex-col items-center text-center">
-          <div className="w-20 h-20 bg-cute-pink/10 rounded-3xl flex items-center justify-center mb-6">
-            <Users className="w-10 h-10 text-cute-pink" />
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+        <div className="bg-white p-8 rounded-[3rem] border-4 border-cute-pink/20 shadow-xl flex flex-col items-center text-center">
+          <div className="w-16 h-16 bg-cute-pink/10 rounded-2xl flex items-center justify-center mb-4">
+            <Users className="w-8 h-8 text-cute-pink" />
           </div>
-          <h3 className="text-2xl font-display text-brand-900 mb-2">Total Unique Visitors</h3>
-          <div className="text-6xl font-display text-cute-pink">
-            {analyticsData ? analyticsData.totalVisitors : <Loader2 className="w-12 h-12 animate-spin mx-auto" />}
+          <h3 className="text-xl font-display text-brand-900 mb-1">Unique Visitors</h3>
+          <div className="text-5xl font-display text-cute-pink">
+            {analyticsData ? analyticsData.totalVisitors : <Loader2 className="w-10 h-10 animate-spin mx-auto" />}
           </div>
-          <p className="text-brand-500 mt-4 font-medium italic">People who discovered Snap2Serve!</p>
+          <p className="text-brand-500 mt-2 text-sm font-medium italic">Discoveries!</p>
         </div>
 
-        <div className="bg-white p-10 rounded-[3rem] border-4 border-cute-blue/20 shadow-xl flex flex-col items-center text-center">
-          <div className="w-20 h-20 bg-cute-blue/10 rounded-3xl flex items-center justify-center mb-6">
-            <Timer className="w-10 h-10 text-cute-blue" />
+        <div className="bg-white p-8 rounded-[3rem] border-4 border-cute-yellow/20 shadow-xl flex flex-col items-center text-center">
+          <div className="w-16 h-16 bg-cute-yellow/10 rounded-2xl flex items-center justify-center mb-4">
+            <TrendingUp className="w-8 h-8 text-cute-yellow" />
           </div>
-          <h3 className="text-2xl font-display text-brand-900 mb-2">Avg. Time Spent</h3>
-          <div className="text-6xl font-display text-cute-blue">
+          <h3 className="text-xl font-display text-brand-900 mb-1">Total Visits</h3>
+          <div className="text-5xl font-display text-cute-yellow">
+            {analyticsData ? analyticsData.totalVisits : <Loader2 className="w-10 h-10 animate-spin mx-auto" />}
+          </div>
+          <p className="text-brand-500 mt-2 text-sm font-medium italic">Total sessions!</p>
+        </div>
+
+        <div className="bg-white p-8 rounded-[3rem] border-4 border-cute-blue/20 shadow-xl flex flex-col items-center text-center">
+          <div className="w-16 h-16 bg-cute-blue/10 rounded-2xl flex items-center justify-center mb-4">
+            <Timer className="w-8 h-8 text-cute-blue" />
+          </div>
+          <h3 className="text-xl font-display text-brand-900 mb-1">Avg. Time Spent</h3>
+          <div className="text-5xl font-display text-cute-blue">
             {analyticsData ? (
               analyticsData.avgTimeSpent < 60 
                 ? `${Math.round(analyticsData.avgTimeSpent)}s`
                 : `${Math.round(analyticsData.avgTimeSpent / 60)}m ${Math.round(analyticsData.avgTimeSpent % 60)}s`
             ) : (
-              <Loader2 className="w-12 h-12 animate-spin mx-auto" />
+              <Loader2 className="w-10 h-10 animate-spin mx-auto" />
             )}
           </div>
-          <p className="text-brand-500 mt-4 font-medium italic">Average duration of a yummy session!</p>
+          <p className="text-brand-500 mt-2 text-sm font-medium italic">Session duration!</p>
+        </div>
+      </div>
+
+      <div className="mt-12 bg-white p-10 rounded-[3rem] border-4 border-cute-mint/20 shadow-xl">
+        <h3 className="text-2xl font-display mb-8 text-cute-mint flex items-center gap-2">
+          <BarChart3 className="w-6 h-6" />
+          Visits Per Day
+        </h3>
+        <div className="h-[300px] w-full">
+          {analyticsData ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={analyticsData.visitsPerDay}>
+                <defs>
+                  <linearGradient id="colorVisits" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#4ADE80" stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor="#4ADE80" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#F1F5F9" />
+                <XAxis 
+                  dataKey="date" 
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fill: '#94A3B8', fontSize: 12 }}
+                  dy={10}
+                />
+                <YAxis 
+                  axisLine={false}
+                  tickLine={false}
+                  tick={{ fill: '#94A3B8', fontSize: 12 }}
+                />
+                <Tooltip 
+                  contentStyle={{ 
+                    borderRadius: '1rem', 
+                    border: 'none', 
+                    boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)',
+                    padding: '1rem'
+                  }}
+                />
+                <Area 
+                  type="monotone" 
+                  dataKey="count" 
+                  stroke="#4ADE80" 
+                  strokeWidth={4}
+                  fillOpacity={1} 
+                  fill="url(#colorVisits)" 
+                  name="Visits"
+                />
+              </AreaChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-full flex items-center justify-center">
+              <Loader2 className="w-12 h-12 animate-spin text-cute-mint" />
+            </div>
+          )}
         </div>
       </div>
 
@@ -1858,16 +2114,18 @@ export default function App() {
             <Heart className={cn("w-4 h-4", favorites.length > 0 && "fill-cute-pink text-cute-pink")} />
             Favorites ({favorites.length})
           </button>
-          <button 
-            onClick={() => setStep('analytics')}
-            className={cn(
-              "flex items-center gap-2 text-sm font-bold transition-colors",
-              step === 'analytics' ? "text-cute-pink" : "text-brand-600 hover:text-cute-pink"
-            )}
-          >
-            <BarChart3 className="w-4 h-4" />
-            Analytics
-          </button>
+          { (user?.role === 'admin' || user?.email === 'pranati.parandkar@gmail.com' || user?.email === 'palaijharana98@gmail.com') && (
+            <button 
+              onClick={() => setStep('analytics')}
+              className={cn(
+                "flex items-center gap-2 text-sm font-bold transition-colors",
+                step === 'analytics' ? "text-cute-pink" : "text-brand-600 hover:text-cute-pink"
+              )}
+            >
+              <BarChart3 className="w-4 h-4" />
+              Analytics
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-3">

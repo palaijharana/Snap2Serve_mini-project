@@ -1,0 +1,36 @@
+{
+  "entities": {
+    "session": {
+      "title": "Session",
+      "description": "A user's visit session on the website.",
+      "type": "object",
+      "properties": {
+        "visitorId": {
+          "type": "string",
+          "description": "Unique identifier for the visitor."
+        },
+        "startTime": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The time the session started."
+        },
+        "endTime": {
+          "type": "string",
+          "format": "date-time",
+          "description": "The time the session ended."
+        },
+        "duration": {
+          "type": "number",
+          "description": "Duration of the session in seconds."
+        }
+      },
+      "required": ["visitorId", "startTime"]
+    }
+  },
+  "firestore": {
+    "/sessions/{sessionId}": {
+      "schema": "session",
+      "description": "Collection of user sessions."
+    }
+  }
+}

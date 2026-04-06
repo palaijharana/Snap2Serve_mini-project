@@ -63,7 +63,7 @@ export async function generateRecipes(
   preferences: UserPreferences
 ): Promise<Recipe[]> {
   try {
-    const prompt = `Generate 9 yummy and accurate recipes using these ingredients: ${ingredients.join(", ")}.
+    const prompt = `Generate 6 yummy and accurate recipes using these ingredients: ${ingredients.join(", ")}.
     
     User Preferences:
     - Cuisine Style: ${preferences.cuisine || "Any (be creative but authentic)"}
@@ -78,7 +78,7 @@ export async function generateRecipes(
     
     Return ONLY a JSON array of recipe objects with this structure:
     [{
-      "id": "unique-id",
+      "id": "a-truly-unique-string-id",
       "title": "Recipe Title",
       "description": "Short yummy description",
       "ingredients": ["item 1", "item 2"],
